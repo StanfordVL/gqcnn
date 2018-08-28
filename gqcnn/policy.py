@@ -1,9 +1,31 @@
+# -*- coding: utf-8 -*-
+"""
+Copyright ©2017. The Regents of the University of California (Regents). All Rights Reserved.
+Permission to use, copy, modify, and distribute this software and its documentation for educational,
+research, and not-for-profit purposes, without fee and without a signed licensing agreement, is
+hereby granted, provided that the above copyright notice, this paragraph and the following two
+paragraphs appear in all copies, modifications, and distributions. Contact The Office of Technology
+Licensing, UC Berkeley, 2150 Shattuck Avenue, Suite 510, Berkeley, CA 94720-1620, (510) 643-
+7201, otl@berkeley.edu, http://ipira.berkeley.edu/industry-info for commercial licensing opportunities.
+
+IN NO EVENT SHALL REGENTS BE LIABLE TO ANY PARTY FOR DIRECT, INDIRECT, SPECIAL,
+INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING LOST PROFITS, ARISING OUT OF
+THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION, EVEN IF REGENTS HAS BEEN
+ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+REGENTS SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+PURPOSE. THE SOFTWARE AND ACCOMPANYING DOCUMENTATION, IF ANY, PROVIDED
+HEREUNDER IS PROVIDED "AS IS". REGENTS HAS NO OBLIGATION TO PROVIDE
+MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+"""
 """
 Grasping policies
 Author: Jeff Mahler
 """
 from abc import ABCMeta, abstractmethod
 
+import cPickle as pkl
 import logging
 import matplotlib.pyplot as plt
 import numpy as np
@@ -15,11 +37,12 @@ from sklearn.mixture import GaussianMixture
 
 import autolab_core.utils as utils
 from autolab_core import Point
-from perception import DepthImage
+from perception import CameraIntrinsics
+from perception import BinaryImage, ColorImage, DepthImage, RgbdImage
 
-from gqcnn import Grasp2D, ImageGraspSamplerFactory, GQCNN, InputDataMode
-from gqcnn import Visualizer as vis
-from gqcnn import NoValidGraspsException
+from . import Grasp2D, ImageGraspSamplerFactory, GQCNN, InputDataMode
+from . import Visualizer as vis
+from . import NoValidGraspsException
 
 FIGSIZE = 16
 SEED = 5234709
@@ -45,6 +68,45 @@ class RgbdImageState(object):
         self.segmask = segmask
         self.fully_observed = fully_observed
 
+    def save(self, save_dir):
+        if not os.path.exists(save_dir):
+            os.mkdir(save_dir)
+        color_image_filename = os.path.join(save_dir, 'color.png')
+        depth_image_filename = os.path.join(save_dir, 'depth.npy')
+        camera_intr_filename = os.path.join(save_dir, 'camera.intr')
+        segmask_filename = os.path.join(save_dir, 'segmask.npy')
+        state_filename = os.path.join(save_dir, 'state.pkl')
+        self.rgbd_im.color.save(color_image_filename)
+        self.rgbd_im.depth.save(depth_image_filename)
+        self.camera_intr.save(camera_intr_filename)
+        if self.segmask is not None:
+            self.segmask.save(segmask_filename)
+        if self.fully_observed is not None:
+            pkl.dump(self.fully_observed, open(state_filename, 'wb'))
+
+    @staticmethod
+    def load(save_dir):
+        if not os.path.exists(save_dir):
+            raise ValueError('Directory %s does not exist!' %(save_dir))
+        color_image_filename = os.path.join(save_dir, 'color.png')
+        depth_image_filename = os.path.join(save_dir, 'depth.npy')
+        camera_intr_filename = os.path.join(save_dir, 'camera.intr')
+        segmask_filename = os.path.join(save_dir, 'segmask.npy')
+        state_filename = os.path.join(save_dir, 'state.pkl')
+        color = ColorImage.open(color_image_filename)
+        depth = DepthImage.open(depth_image_filename)
+        camera_intr = CameraIntrinsics.load(camera_intr_filename)
+        segmask = None
+        if os.path.exists(segmask_filename):
+            segmask = BinaryImage.open(segmask_filename)
+        fully_observed = None    
+        if os.path.exists(state_filename):
+            fully_observed = pkl.load(open(state_filename, 'rb'))
+        return RgbdImageState(RgbdImage.from_color_and_depth(color, depth),
+                              camera_intr,
+                              segmask=segmask,
+                              fully_observed=fully_observed)
+            
 class ParallelJawGrasp(object):
     """ Action to encapsulate parallel jaw grasps.
     """
@@ -53,6 +115,28 @@ class ParallelJawGrasp(object):
         self.q_value = q_value
         self.image = image
 
+    def save(self, save_dir):
+        if not os.path.exists(save_dir):
+            os.mkdir(save_dir)
+        grasp_filename = os.path.join(save_dir, 'grasp.pkl')
+        q_value_filename = os.path.join(save_dir, 'pred_robustness.pkl')
+        image_filename = os.path.join(save_dir, 'tf_image.npy')
+        pkl.dump(self.grasp, open(grasp_filename, 'wb'))
+        pkl.dump(self.q_value, open(q_value_filename, 'wb'))
+        self.image.save(image_filename)
+
+    @staticmethod
+    def load(save_dir):
+        if not os.path.exists(save_dir):
+            raise ValueError('Directory %s does not exist!' %(save_dir))
+        grasp_filename = os.path.join(save_dir, 'grasp.pkl')
+        q_value_filename = os.path.join(save_dir, 'pred_robustness.pkl')
+        image_filename = os.path.join(save_dir, 'tf_image.npy')
+        grasp = pkl.load(open(grasp_filename, 'rb'))
+        q_value = pkl.load(open(q_value_filename, 'rb'))
+        image = DepthImage.open(image_filename)
+        return ParallelJawGrasp(grasp, q_value, image)
+        
 class Policy(object):
     """ Abstract policy class. """
     __metaclass__ = ABCMeta
@@ -96,6 +180,9 @@ class GraspingPolicy(Policy):
         self._logging_dir = None
         if 'logging_dir' in config.keys():
             self._logging_dir = config['logging_dir']
+            self._policy_dir = self._logging_dir
+            if not os.path.exists(self._logging_dir):
+                os.mkdir(self._logging_dir)
         sampler_type = self._sampling_config['type']
         
         # init grasp sampler
@@ -131,18 +218,42 @@ class GraspingPolicy(Policy):
         """ Returns the GQ-CNN. """
         return self._gqcnn
 
-    @abstractmethod
     def action(self, state):
+        """ Returns an action for a given state.
+        Public handle to function.
+        """
+        # save state
+        if self._logging_dir is not None:
+            policy_id = utils.gen_experiment_id()
+            self._policy_dir = os.path.join(self._logging_dir, 'policy_output_%s' %(policy_id))
+            while os.path.exists(self._policy_dir):
+                policy_id = utils.gen_experiment_id()
+            self._policy_dir = os.path.join(self._logging_dir, 'policy_output_%s' %(policy_id))
+            os.mkdir(self._policy_dir)
+            state_dir = os.path.join(self._policy_dir, 'state')
+            state.save(state_dir)
+
+        # plan action
+        action = self._action(state)
+
+        # save action
+        if self._logging_dir is not None:
+            action_dir = os.path.join(self._policy_dir, 'action')
+            action.save(action_dir)
+        return action
+        
+    @abstractmethod
+    def _action(self, state):
         """ Returns an action for a given state.
         """
         pass
-
+    
     def show(self, filename=None, dpi=100):
         """ Show a figure. """
         if self._logging_dir is None:
             vis.show()
         else:
-            filename = os.path.join(self._logging_dir, filename)
+            filename = os.path.join(self._policy_dir, filename)
             vis.savefig(filename, dpi=dpi)
 
     def grasps_to_tensors(self, grasps, state):
@@ -222,7 +333,7 @@ class AntipodalGraspingPolicy(GraspingPolicy):
         self._gripper_width = np.inf
         if 'gripper_width' in self.config.keys():
             self._gripper_width = self.config['gripper_width']
-
+            
     def select(self, grasps, q_value):
         """ Selects the grasp with the highest probability of success.
         Can override for alternate policies (e.g. epsilon greedy).
@@ -233,7 +344,7 @@ class AntipodalGraspingPolicy(GraspingPolicy):
         grasps_and_predictions.sort(key = lambda x : x[1], reverse=True)
         return grasps_and_predictions[0][0]
 
-    def action(self, state):
+    def _action(self, state):
         """ Plans the grasp with the highest probability of success on
         the given RGB-D image.
 
@@ -418,7 +529,7 @@ class CrossEntropyAntipodalGraspingPolicy(GraspingPolicy):
         grasps_and_predictions.sort(key = lambda x : x[1], reverse=True)
         return grasps_and_predictions[0][0]
 
-    def action(self, state):
+    def _action(self, state):
         """ Plans the grasp with the highest probability of success on
         the given RGB-D image.
 
@@ -761,7 +872,7 @@ class EpsilonGreedyQFunctionAntipodalGraspingPolicy(QFunctionAntipodalGraspingPo
         """
         return CrossEntropyAntipodalGraspingPolicy.action(self, state)
     
-    def action(self, state):
+    def _action(self, state):
         """ Plans the grasp with the highest probability of success on
         the given RGB-D image.
 

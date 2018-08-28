@@ -1,3 +1,24 @@
+# -*- coding: utf-8 -*-
+"""
+Copyright ©2017. The Regents of the University of California (Regents). All Rights Reserved.
+Permission to use, copy, modify, and distribute this software and its documentation for educational,
+research, and not-for-profit purposes, without fee and without a signed licensing agreement, is
+hereby granted, provided that the above copyright notice, this paragraph and the following two
+paragraphs appear in all copies, modifications, and distributions. Contact The Office of Technology
+Licensing, UC Berkeley, 2150 Shattuck Avenue, Suite 510, Berkeley, CA 94720-1620, (510) 643-
+7201, otl@berkeley.edu, http://ipira.berkeley.edu/industry-info for commercial licensing opportunities.
+
+IN NO EVENT SHALL REGENTS BE LIABLE TO ANY PARTY FOR DIRECT, INDIRECT, SPECIAL,
+INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING LOST PROFITS, ARISING OUT OF
+THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION, EVEN IF REGENTS HAS BEEN
+ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+REGENTS SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+PURPOSE. THE SOFTWARE AND ACCOMPANYING DOCUMENTATION, IF ANY, PROVIDED
+HEREUNDER IS PROVIDED "AS IS". REGENTS HAS NO OBLIGATION TO PROVIDE
+MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+"""
 """
 Quick wrapper for grasp quality neural network
 Author: Jeff Mahler
@@ -6,16 +27,16 @@ Author: Jeff Mahler
 import copy
 import json
 import logging
-import numpy as np
 import os
 import sys
-import tensorflow as tf
+
 import matplotlib.pyplot as plt
+import numpy as np
+import tensorflow as tf
 
 from autolab_core import YamlConfig
+from . import InputDataMode, TrainingMode
 
-import optimizer_constants
-from optimizer_constants import InputDataMode
 def reduce_shape(shape):
     """ Get shape of a layer for flattening """
     shape = [x.value for x in shape[1:]]
@@ -76,7 +97,13 @@ class GQCNN(object):
         # create GQCNN object and initialize weights and network
         gqcnn = GQCNN(gqcnn_config)
         gqcnn.init_weights_file(os.path.join(model_dir, 'model.ckpt'))
-        gqcnn.initialize_network()
+        training_mode = train_config['training_mode']
+        if training_mode == TrainingMode.CLASSIFICATION:
+            gqcnn.initialize_network(add_softmax=True)
+        elif training_mode == TrainingMode.REGRESSION:
+            gqcnn.initialize_network()
+        else:
+            raise ValueError('Invalid training mode: {}'.format(training_mode))
         gqcnn.init_mean_and_std(model_dir)
 
         return gqcnn
@@ -439,11 +466,6 @@ class GQCNN(object):
             # u, v, depth, theta, cx, cy
             self._pose_dim = 6
 
-        # create feed tensors for prediction
-        self._input_im_arr = np.zeros([self._batch_size, self._im_height,
-                                       self._im_width, self._num_channels])
-        self._input_pose_arr = np.zeros([self._batch_size, self._pose_dim])
-
         # load architecture
         self._architecture = config['architecture']
         self._use_conv3 = False
@@ -481,7 +503,7 @@ class GQCNN(object):
         self._pose_mean = np.zeros(self._pose_dim)
         self._pose_std = np.ones(self._pose_dim)
 
-    def initialize_network(self, add_softmax=True):
+    def initialize_network(self, add_softmax=False):
         """ Set up input nodes and builds network.
 
         Parameters
@@ -489,6 +511,11 @@ class GQCNN(object):
         add_softmax : float
             whether or not to add a softmax layer
         """
+
+        # create feed tensors for prediction
+        self._input_im_arr = np.zeros([self._batch_size, self._im_height,
+                                           self._im_width, self._num_channels])
+        self._input_pose_arr = np.zeros([self._batch_size, self._pose_dim])
 
         with self._graph.as_default():
             # setup tf input placeholders and build network
